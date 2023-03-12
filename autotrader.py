@@ -23,8 +23,8 @@ from typing import List
 from ready_trader_go import BaseAutoTrader, Instrument, Lifespan, MAXIMUM_ASK, MINIMUM_BID, Side
 
 
-LOT_SIZE = 200
-POSITION_LIMIT = 200
+LOT_SIZE = 10
+POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
 MIN_BID_NEAREST_TICK = (MINIMUM_BID + TICK_SIZE_IN_CENTS) // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
@@ -57,7 +57,8 @@ class AutoTrader(BaseAutoTrader):
         self.logger.warning("error with order %d: %s", client_order_id, error_message.decode())
         if client_order_id != 0 and (client_order_id in self.bids or client_order_id in self.asks):
             self.on_order_status_message(client_order_id, 0, 0, 0)
-    def pairs_trading(prev_trading_ETF, prev_prices_FUTURE):
+
+    def pairs_trading(prev_ETF, prev_prices_FUTURE):
         np.corr()
     def on_hedge_filled_message(self, client_order_id: int, price: int, volume: int) -> None:
         """Called when one of your hedge orders is filled.
@@ -80,10 +81,15 @@ class AutoTrader(BaseAutoTrader):
         """
         self.logger.info("received order book for instrument %d with sequence number %d", instrument,
                          sequence_number)
-        if instrument == Instrument.FUTURE:
-            price_adjustment = (self.position // LOT_SIZE) * TICK_SIZE_IN_CENTS 
-            new_bid_price = bid_prices[0] + price_adjustment if bid_prices[0] != 0 else 0
-            new_ask_price = ask_prices[0] + price_adjustment if ask_prices[0] != 0 else 0
+        if instrument == Instrument.ETF:
+            #price_adjustment = - (self.position // LOT_SIZE) * TICK_SIZE_IN_CENTS 
+           # print(f"Price adjustment{price_adjustment}")
+            new_bid_price = bid_prices[0] if bid_prices[0] != 0 else 0
+            print(f"new bid{new_bid_price} ")
+            new_ask_price = ask_prices[0] if ask_prices[0] != 0 else 0
+            print(f"new ask {new_ask_price}")
+            spread = new_ask_price - new_bid_price
+            print(spread)
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
                 self.send_cancel_order(self.bid_id)
@@ -92,13 +98,14 @@ class AutoTrader(BaseAutoTrader):
                 self.send_cancel_order(self.ask_id)
                 self.ask_id = 0
 
-            if self.bid_id == 0 and new_bid_price != 0 and self.position < POSITION_LIMIT:
+            if self.bid_id == 0 and new_bid_price != 0 and spread < 150:
                 self.bid_id = next(self.order_ids)
                 self.bid_price = new_bid_price
                 self.send_insert_order(self.bid_id, Side.BUY, new_bid_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
                 self.bids.add(self.bid_id)
+            
 
-            if self.ask_id == 0 and new_ask_price != 0 and self.position > -POSITION_LIMIT:
+            if self.ask_id == 0 and new_ask_price != 0 and spread > 150:
                 self.ask_id = next(self.order_ids)
                 self.ask_price = new_ask_price
                 self.send_insert_order(self.ask_id, Side.SELL, new_ask_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
