@@ -17,6 +17,8 @@
 #     <https://www.gnu.org/licenses/>.
 import asyncio
 import itertools
+import numpy as np
+import pandas as pd
 
 from typing import List
 
@@ -47,6 +49,8 @@ class AutoTrader(BaseAutoTrader):
         self.bids = set()
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
+        self.etf_prices = np.zeros(10)
+        self.future_prices = np.zeros(10)
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -68,22 +72,42 @@ class AutoTrader(BaseAutoTrader):
         self.logger.info("received hedge filled for order %d with average price %d and volume %d", client_order_id,
                          price, volume)
 
+    
+    def correlations(self, instrument: int, sequence_number: int):
+        if len(self.etf_prices) <= 10:
+            self.etf_prices = np.append(self.etf_prices[1:10], instrument)
+            self.future_prices = np.append(self.future_prices[1:10], sequence_number)
+            price_diff = self.future_prices - self.etf_prices
+            print(f" price diff{price_diff}")
+            z_score = (price_diff - np.mean(price_diff)) / np.std(price_diff)
+            # z_score = np.corrcoef(self.etf_prices, self.future_prices)
+            print(z_score)
+        else:
+            self.etf_prices = np.delete(self.etf_prices, 0)
+            self.etf_prices = np.append(self.etf_prices[:], instrument)
+            self.future_prices = np.delete(self.future_prices, 0)
+            self.future_prices = np.append(self.future_prices[:], sequence_number)
+            price_diff = self.future_prices - self.etf_prices
+            print(f" price diff{price_diff}")
+            z_score = (price_diff - np.mean(price_diff)) / np.std(price_diff)
+            # z_score = np.corrcoef(self.etf_prices, self.future_prices)
+            print(z_score)
+        return z_score
+    
     def on_order_book_update_message(self, instrument: int, sequence_number: int, ask_prices: List[int],
                                      ask_volumes: List[int], bid_prices: List[int], bid_volumes: List[int]) -> None:
-        """Called periodically to report the status of an order book.
-
-        The sequence number can be used to detect missed or out-of-order
-        messages. The five best available ask (i.e. sell) and bid (i.e. buy)
-        prices are reported along with the volume available at each of those
-        price levels.
-        """
         self.logger.info("received order book for instrument %d with sequence number %d", instrument,
                          sequence_number)
-        if instrument == Instrument.FUTURE:
-            price_adjustment = - (self.position // LOT_SIZE) * TICK_SIZE_IN_CENTS
-            new_bid_price = bid_prices[0] + price_adjustment if bid_prices[0] != 0 else 0
-            new_ask_price = ask_prices[0] + price_adjustment if ask_prices[0] != 0 else 0
+        if instrument == Instrument.FUTURE:  
+            price_1 =  ask_prices[0] if instrument == Instrument.ETF else ask_prices[0]
+            price_2 = bid_prices[0] if instrument == Instrument.FUTURE else bid_prices[0]
 
+            spread = price_1 - price_2
+            z_score = self.correlations(price_1, price_2)
+            #price_adjustment = - (self.position // LOT_SIZE) * TICK_SIZE_IN_CENTS
+            #new_bid_price = bid_prices[0] + price_adjustment if bid_prices[0] != 0 else 0
+            #new_ask_price = ask_prices[0] + price_adjustment if ask_prices[0] != 0 else 0
+            """
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
                 self.send_cancel_order(self.bid_id)
                 self.bid_id = 0
@@ -93,7 +117,7 @@ class AutoTrader(BaseAutoTrader):
 
             if self.bid_id == 0 and new_bid_price != 0 and self.position < POSITION_LIMIT:
                 self.bid_id = next(self.order_ids)
-                self.bid_price = new_bid_price
+                self.bid_price = spread
                 self.send_insert_order(self.bid_id, Side.BUY, new_bid_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
                 self.bids.add(self.bid_id)
 
@@ -102,6 +126,68 @@ class AutoTrader(BaseAutoTrader):
                 self.ask_price = new_ask_price
                 self.send_insert_order(self.ask_id, Side.SELL, new_ask_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
                 self.asks.add(self.ask_id)
+            
+            """
+            
+            if self.bid_id != 0:
+                self.send_cancel_order(self.bid_id)
+                self.bid_id = 0
+            if self.ask_id != 0:
+                self.send_cancel_order(self.ask_id)
+                self.ask_id = 0
+        
+            if z_score > 0 and self.ask_id == 0:
+                new_ask_price = price_2 - TICK_SIZE_IN_CENTS
+                if new_ask_price != self.ask_price:
+                    self.ask_id = next(self.order_ids)
+                    self.ask_price = new_ask_price
+                    self.send_insert_order(self.ask_id, Side.SELL, new_ask_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
+                    self.asks.add(self.ask_id)
+                  
+            elif z_score < 0 and self.bid_id == 0:
+                new_bid_price = price_1 - TICK_SIZE_IN_CENTS
+                if new_bid_price != self.bid_price:
+                    
+                    self.bid_id = next(self.order_ids)
+                    self.bid_price = new_bid_price
+                    self.send_insert_order(self.bid_id, Side.BUY, new_bid_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
+                    self.bids.add(self.bid_id)  
+                    
+
+    # def on_order_book_update_message(self, instrument: int, sequence_number: int, ask_prices: List[int],
+    #                                  ask_volumes: List[int], bid_prices: List[int], bid_volumes: List[int]) -> None:
+    #     """Called periodically to report the status of an order book.
+
+    #     The sequence number can be used to detect missed or out-of-order
+    #     messages. The five best available ask (i.e. sell) and bid (i.e. buy)
+    #     prices are reported along with the volume available at each of those
+    #     price levels.
+    #     """
+    #     self.logger.info("received order book for instrument %d with sequence number %d", instrument,
+    #                      sequence_number)
+    #     if instrument == Instrument.FUTURE:
+    #         price_adjustment = - (self.position // LOT_SIZE) * TICK_SIZE_IN_CENTS
+    #         new_bid_price = bid_prices[0] + price_adjustment if bid_prices[0] != 0 else 0
+    #         new_ask_price = ask_prices[0] + price_adjustment if ask_prices[0] != 0 else 0
+
+    #         if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
+    #             self.send_cancel_order(self.bid_id)
+    #             self.bid_id = 0
+    #         if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
+    #             self.send_cancel_order(self.ask_id)
+    #             self.ask_id = 0
+
+    #         if self.bid_id == 0 and new_bid_price != 0 and self.position < POSITION_LIMIT:
+    #             self.bid_id = next(self.order_ids)
+    #             self.bid_price = new_bid_price
+    #             self.send_insert_order(self.bid_id, Side.BUY, new_bid_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
+    #             self.bids.add(self.bid_id)
+
+    #         if self.ask_id == 0 and new_ask_price != 0 and self.position > -POSITION_LIMIT:
+    #             self.ask_id = next(self.order_ids)
+    #             self.ask_price = new_ask_price
+    #             self.send_insert_order(self.ask_id, Side.SELL, new_ask_price, LOT_SIZE, Lifespan.GOOD_FOR_DAY)
+    #             self.asks.add(self.ask_id)
 
     def on_order_filled_message(self, client_order_id: int, price: int, volume: int) -> None:
         """Called when one of your orders is filled, partially or fully.
